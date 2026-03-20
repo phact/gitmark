@@ -62,7 +62,8 @@ def parse_diff_output(diff_output: str) -> Dict[str, List[Hunk]]:
                 current_hunk_lines = []
 
             # Extract file path from diff --git a/file b/file
-            match = re.search(r'b/(.+)$', line)
+            # Use non-greedy match to handle paths correctly
+            match = re.search(r'diff --git a/.+ b/(.+)$', line)
             if match:
                 current_file = match.group(1)
 
