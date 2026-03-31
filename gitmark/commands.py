@@ -76,22 +76,39 @@ def cmd_diff(args) -> int:
             hunk_id = get_hunk_identifier(hunk)
             owner = plan.find_hunk_owner(hunk_id)
 
-            # Extract first line of actual code change for display
-            first_line = ""
-            for line in hunk.content[1:]:  # Skip header
-                if line.startswith(('+', '-')) and not line.startswith(('+++', '---')):
-                    first_line = line[:50]  # Truncate long lines
-                    break
+            # Handle renames
+            if hunk.is_rename and hunk.start_line == 0:
+                # Pure rename
+                display = f"renamed from {hunk.rename_from}"
+                if hunk.rename_similarity:
+                    display += f" (similarity {hunk.rename_similarity}%)"
 
-            # Format: :line +added -removed first_line_preview → tag
-            added = f"+{hunk.added_lines}" if hunk.added_lines else ""
-            removed = f"-{hunk.removed_lines}" if hunk.removed_lines else ""
-            stats = f"{added:>4} {removed:>4}"
-
-            if owner:
-                print(f"  :{hunk.start_line:<4} {stats}  {first_line:<40} {Fore.GREEN}→ {owner}{Style.RESET_ALL}")
+                if owner:
+                    print(f"  {display:<60} {Fore.GREEN}→ {owner}{Style.RESET_ALL}")
+                else:
+                    print(f"  {display:<60} {Fore.YELLOW}✗ unassigned{Style.RESET_ALL}")
             else:
-                print(f"  :{hunk.start_line:<4} {stats}  {first_line:<40} {Fore.YELLOW}✗ unassigned{Style.RESET_ALL}")
+                # Regular hunk
+                # Extract first line of actual code change for display
+                first_line = ""
+                for line in hunk.content[1:]:  # Skip header
+                    if line.startswith(('+', '-')) and not line.startswith(('+++', '---')):
+                        first_line = line[:50]  # Truncate long lines
+                        break
+
+                # Format: :line +added -removed first_line_preview → tag
+                added = f"+{hunk.added_lines}" if hunk.added_lines else ""
+                removed = f"-{hunk.removed_lines}" if hunk.removed_lines else ""
+                stats = f"{added:>4} {removed:>4}"
+
+                prefix = f"  :{hunk.start_line:<4} {stats}  {first_line:<40}"
+                if hunk.is_rename:
+                    prefix = f"  :{hunk.start_line:<4} {stats}  (renamed from {hunk.rename_from}) {first_line:<25}"
+
+                if owner:
+                    print(f"{prefix} {Fore.GREEN}→ {owner}{Style.RESET_ALL}")
+                else:
+                    print(f"{prefix} {Fore.YELLOW}✗ unassigned{Style.RESET_ALL}")
 
         print()  # Blank line between files
 
@@ -468,17 +485,31 @@ def _execute_commit(commit: NamedCommit, hunks_by_file: Dict[str, List[Hunk]]) -
     current_file = None
 
     for hunk_id in commit.hunks:
-        # Parse hunk_id to get file and line
-        file_path, line_str = hunk_id.rsplit(':', 1)
-        line = int(line_str)
+        # Parse hunk_id - could be "file:line" or "old -> new" for renames
+        if ' -> ' in hunk_id:
+            # Rename: "old.txt -> new.txt"
+            old_path, new_path = hunk_id.split(' -> ', 1)
+            file_path = new_path
 
-        # Find the hunk
-        hunk = None
-        if file_path in hunks_by_file:
-            for h in hunks_by_file[file_path]:
-                if h.start_line == line:
-                    hunk = h
-                    break
+            # Find the rename hunk
+            hunk = None
+            if new_path in hunks_by_file:
+                for h in hunks_by_file[new_path]:
+                    if h.is_rename and h.rename_from == old_path:
+                        hunk = h
+                        break
+        else:
+            # Regular hunk: "file:line"
+            file_path, line_str = hunk_id.rsplit(':', 1)
+            line = int(line_str)
+
+            # Find the hunk
+            hunk = None
+            if file_path in hunks_by_file:
+                for h in hunks_by_file[file_path]:
+                    if h.start_line == line:
+                        hunk = h
+                        break
 
         if not hunk:
             print(f"        {Fore.RED}✗ hunk not found: {hunk_id}{Style.RESET_ALL}")
@@ -489,29 +520,55 @@ def _execute_commit(commit: NamedCommit, hunks_by_file: Dict[str, List[Hunk]]) -
             if current_file is not None:
                 patch_lines.append("")  # Blank line between files
 
-            patch_lines.append(f"diff --git a/{file_path} b/{file_path}")
+            # Handle renames
+            if hunk.is_rename:
+                patch_lines.append(f"diff --git a/{hunk.rename_from} b/{file_path}")
+            else:
+                patch_lines.append(f"diff --git a/{file_path} b/{file_path}")
 
             # Check if this is a new file (hunk starts at line 1 with only additions)
-            is_new_file = (hunk.start_line == 1 and hunk.removed_lines == 0)
+            is_new_file = (hunk.start_line == 1 and hunk.removed_lines == 0 and not hunk.is_rename)
             if is_new_file:
                 patch_lines.append("new file mode 100644")
                 patch_lines.append("index 0000000..0000000")
 
+            # For pure renames, use the rename headers from content
+            if hunk.is_rename and hunk.start_line == 0:
+                # This is a pure rename - use its full content (similarity, rename from/to)
+                patch_lines.extend(hunk.content[1:])  # Skip the diff --git line we already added
+                current_file = file_path
+                continue  # Don't add hunk content again
+
             if is_new_file:
                 patch_lines.append("--- /dev/null")
+            elif hunk.is_rename:
+                patch_lines.append(f"--- a/{hunk.rename_from}")
             else:
                 patch_lines.append(f"--- a/{file_path}")
             patch_lines.append(f"+++ b/{file_path}")
             current_file = file_path
 
-        # Add hunk content
-        patch_lines.extend(hunk.content)
+        # Add hunk content (skip for pure renames handled above)
+        if not (hunk.is_rename and hunk.start_line == 0):
+            patch_lines.extend(hunk.content)
 
     # Join with newlines and add trailing newline (required by git apply)
     patch = '\n'.join(patch_lines) + '\n'
 
     # Apply to index
     print(f"        applying...  ", end='', flush=True)
+
+    # Check if any hunks involve renames - if so, we need to read HEAD tree first
+    has_renames = any(h.is_rename for file_hunks in hunks_by_file.values() for h in file_hunks if get_hunk_identifier(h) in commit.hunks)
+
+    if has_renames:
+        # Initialize index from HEAD so renamed files exist
+        from .git_ops import run_git_command
+        try:
+            run_git_command(['read-tree', 'HEAD'])
+        except:
+            pass  # No HEAD yet, that's OK
+
     success, error = apply_patch_to_index(patch)
     if not success:
         print(f"{Fore.RED}✗ FAILED{Style.RESET_ALL}")
