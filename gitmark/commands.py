@@ -359,16 +359,16 @@ def _commit_single(tag: str, message: str, plan: Plan, hunks_by_file: Dict[str, 
         print(f"{Fore.RED}Error: tag '{tag}' not found{Style.RESET_ALL}")
         return 1
 
-    if not message:
-        print(f"{Fore.RED}Error: commit message required (use -m){Style.RESET_ALL}")
-        return 1
-
     if not commit.hunks:
         print(f"{Fore.RED}Error: no hunks assigned to '{tag}'{Style.RESET_ALL}")
         return 1
 
-    # Set the message
-    commit.message = message
+    # Use provided message or fall back to pre-set message
+    if message:
+        commit.message = message
+    elif not commit.message:
+        print(f"{Fore.RED}Error: commit message required (use -m or 'gitmark message <tag>')){Style.RESET_ALL}")
+        return 1
 
     # Execute the commit
     success, error = _execute_commit(commit, hunks_by_file)
